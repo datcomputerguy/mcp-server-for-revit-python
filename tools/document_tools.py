@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Document management tools for Revit MCP Server"""
 
+from typing import Optional
 from mcp.server.fastmcp import Context
 from .utils import format_response
 
@@ -14,6 +15,7 @@ def register_document_tools(mcp, revit_get, revit_post):
         file_path: str,
         detach: bool = False,
         audit: bool = False,
+        instance: Optional[str] = None,
     ) -> str:
         """Open a Revit document file in the running Revit instance.
 
@@ -25,34 +27,41 @@ def register_document_tools(mcp, revit_get, revit_post):
             detach: If True, open detached from central (workshared files only).
                     Preserves worksets but severs the link to the central model.
             audit: If True, audit the file on open to check for corruption.
+            instance: Revit version year to target when multiple Revits are
+                running (e.g. "2024", "2025"). See list_revit_instances.
         """
         data = {
             "file_path": file_path,
             "detach": detach,
             "audit": audit,
         }
-        response = await revit_post("/open_document/", data, ctx, timeout=120.0)
+        response = await revit_post(
+            "/open_document/", data, ctx, instance=instance, timeout=120.0
+        )
         return format_response(response)
 
     @mcp.tool()
     async def close_document(
         ctx: Context,
         save: bool = False,
+        instance: Optional[str] = None,
     ) -> str:
         """Close the active Revit document.
 
         Args:
             save: If True, save the document before closing.
                   If False (default), close without saving.
+            instance: Revit version year to target. See list_revit_instances.
         """
         data = {"save": save}
-        response = await revit_post("/close_document/", data, ctx)
+        response = await revit_post("/close_document/", data, ctx, instance=instance)
         return format_response(response)
 
     @mcp.tool()
     async def save_document(
         ctx: Context,
         file_path: str = None,
+        instance: Optional[str] = None,
     ) -> str:
         """Save the active Revit document.
 
@@ -61,9 +70,10 @@ def register_document_tools(mcp, revit_get, revit_post):
 
         Args:
             file_path: Optional path for Save As. If omitted, saves in place.
+            instance: Revit version year to target. See list_revit_instances.
         """
         data = {"file_path": file_path}
-        response = await revit_post("/save_document/", data, ctx)
+        response = await revit_post("/save_document/", data, ctx, instance=instance)
         return format_response(response)
 
     @mcp.tool()
@@ -72,6 +82,7 @@ def register_document_tools(mcp, revit_get, revit_post):
         comment: str = "",
         compact: bool = False,
         relinquish_all: bool = True,
+        instance: Optional[str] = None,
     ) -> str:
         """Synchronize the active workshared document with central.
 
@@ -83,11 +94,14 @@ def register_document_tools(mcp, revit_get, revit_post):
             compact: If True, compact the central model during sync.
             relinquish_all: If True (default), relinquish all borrowed elements
                            and worksets after sync.
+            instance: Revit version year to target. See list_revit_instances.
         """
         data = {
             "comment": comment,
             "compact": compact,
             "relinquish_all": relinquish_all,
         }
-        response = await revit_post("/sync_with_central/", data, ctx, timeout=120.0)
+        response = await revit_post(
+            "/sync_with_central/", data, ctx, instance=instance, timeout=120.0
+        )
         return format_response(response)

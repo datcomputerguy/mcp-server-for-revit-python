@@ -6,44 +6,70 @@ from mcp.server.fastmcp import FastMCP, Image, Context
 import base64
 from typing import Optional, Dict, Any, Union
 
+from instance_registry import (
+    REVIT_HOST,
+    PYREVIT_API_ROOT,
+    resolve_port,
+    invalidate,
+)
+
 # Create a generic MCP server for interacting with Revit
 # Use stateless_http=True and json_response=True for better compatibility
 mcp = FastMCP(
-    "Revit MCP Server", 
-    host="127.0.0.1", 
+    "Revit MCP Server",
+    host="127.0.0.1",
     port=8000,
     stateless_http=True,
-    json_response=True
+    json_response=True,
 )
 
-# Configuration
-REVIT_HOST = "localhost"
-REVIT_PORT = 48884  # Default pyRevit Routes port
-BASE_URL = f"http://{REVIT_HOST}:{REVIT_PORT}/revit_mcp"
+
+def _url_for(port: int, endpoint: str) -> str:
+    # endpoint is expected to start with "/"
+    return f"http://{REVIT_HOST}:{port}/{PYREVIT_API_ROOT}{endpoint}"
 
 
-async def revit_get(endpoint: str, ctx: Context = None, **kwargs) -> Union[Dict, str]:
-    """Simple GET request to Revit API"""
-    return await _revit_call("GET", endpoint, ctx=ctx, **kwargs)
+async def revit_get(
+    endpoint: str,
+    ctx: Context = None,
+    instance: Optional[str] = None,
+    **kwargs,
+) -> Union[Dict, str]:
+    """Simple GET request to Revit API (optionally targeting a specific instance)."""
+    return await _revit_call("GET", endpoint, ctx=ctx, instance=instance, **kwargs)
 
 
-async def revit_post(endpoint: str, data: Dict[str, Any], ctx: Context = None, **kwargs) -> Union[Dict, str]:
-    """Simple POST request to Revit API"""
-    return await _revit_call("POST", endpoint, data=data, ctx=ctx, **kwargs)
+async def revit_post(
+    endpoint: str,
+    data: Dict[str, Any],
+    ctx: Context = None,
+    instance: Optional[str] = None,
+    **kwargs,
+) -> Union[Dict, str]:
+    """Simple POST request to Revit API (optionally targeting a specific instance)."""
+    return await _revit_call(
+        "POST", endpoint, data=data, ctx=ctx, instance=instance, **kwargs
+    )
 
 
-async def revit_image(endpoint: str, ctx: Context = None) -> Union[Image, str]:
-    """GET request that returns an Image object"""
+async def revit_image(
+    endpoint: str,
+    ctx: Context = None,
+    instance: Optional[str] = None,
+) -> Union[Image, str]:
+    """GET request that returns an Image object (optionally targeting a specific instance)."""
+    try:
+        port = await resolve_port(instance)
+    except RuntimeError as e:
+        return "Error: {}".format(e)
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.get(f"{BASE_URL}{endpoint}")
-            
+            response = await client.get(_url_for(port, endpoint))
             if response.status_code == 200:
                 data = response.json()
                 image_bytes = base64.b64decode(data["image_data"])
                 return Image(data=image_bytes, format="png")
-            else:
-                return f"Error: {response.status_code} - {response.text}"
+            return f"Error: {response.status_code} - {response.text}"
     except httpx.TimeoutException:
         return "Error: Image export timed out after 60 seconds."
     except Exception as e:
@@ -51,21 +77,45 @@ async def revit_image(endpoint: str, ctx: Context = None) -> Union[Image, str]:
         return f"Error: {msg}"
 
 
-async def _revit_call(method: str, endpoint: str, data: Dict = None, ctx: Context = None,
-                     timeout: float = 30.0, params: Dict = None) -> Union[Dict, str]:
-    """Internal function handling all HTTP calls"""
+async def _revit_call(
+    method: str,
+    endpoint: str,
+    data: Dict = None,
+    ctx: Context = None,
+    timeout: float = 30.0,
+    params: Dict = None,
+    instance: Optional[str] = None,
+) -> Union[Dict, str]:
+    """Internal function handling all HTTP calls against a specific Revit instance."""
+    try:
+        port = await resolve_port(instance)
+    except RuntimeError as e:
+        return "Error: {}".format(e)
+
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            url = f"{BASE_URL}{endpoint}"
-
+            url = _url_for(port, endpoint)
             if method == "GET":
                 response = await client.get(url, params=params)
             else:  # POST
-                response = await client.post(url, json=data, headers={"Content-Type": "application/json"})
-
-            return response.json() if response.status_code == 200 else f"Error: {response.status_code} - {response.text}"
+                response = await client.post(
+                    url,
+                    json=data,
+                    headers={"Content-Type": "application/json"},
+                )
+            if response.status_code == 200:
+                return response.json()
+            # If the instance vanished (e.g. Revit was closed), drop it from
+            # the registry so the next call re-discovers.
+            if response.status_code in (502, 503, 504):
+                await invalidate()
+            return f"Error: {response.status_code} - {response.text}"
     except httpx.TimeoutException:
         return f"Error: Request timed out after {timeout} seconds. The operation may still be running in Revit."
+    except httpx.RequestError:
+        # Network-level failure means the instance is probably gone.
+        await invalidate()
+        return "Error: Revit instance on port {} is not responding.".format(port)
     except Exception as e:
         msg = str(e) or type(e).__name__
         return f"Error: {msg}"
@@ -73,6 +123,7 @@ async def _revit_call(method: str, endpoint: str, data: Dict = None, ctx: Contex
 
 # Register all tools BEFORE the main block
 from tools import register_tools
+
 register_tools(mcp, revit_get, revit_post, revit_image)
 
 
@@ -116,7 +167,10 @@ if __name__ == "__main__":
         transport = "streamable-http"
     elif "--combined" in sys.argv:
         # Run both SSE and streamable-http transports simultaneously
-        print("Starting combined server with SSE (/sse, /messages/) and streamable-http (/mcp) endpoints...")
+        print(
+            "Starting combined server with SSE (/sse, /messages/) and "
+            "streamable-http (/mcp) endpoints..."
+        )
         anyio.run(run_combined_async)
         sys.exit(0)
 

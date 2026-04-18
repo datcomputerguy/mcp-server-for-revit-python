@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Code execution tools for the MCP server."""
 
+from typing import Optional
 from mcp.server.fastmcp import Context
 from .utils import format_response
 
@@ -12,7 +13,10 @@ def register_code_execution_tools(mcp, revit_get, revit_post, revit_image=None):
 
     @mcp.tool()
     async def execute_revit_code(
-        code: str, description: str = "Code execution", ctx: Context = None
+        code: str,
+        description: str = "Code execution",
+        instance: Optional[str] = None,
+        ctx: Context = None,
     ) -> str:
         """
         Execute IronPython code directly in Revit context.
@@ -40,6 +44,14 @@ def register_code_execution_tools(mcp, revit_get, revit_post, revit_image=None):
         - Use getattr(element, 'Name', 'N/A') to safely access the Name property
         - Check elements exist before use: if element:
         - Use hasattr() for optional properties
+
+        Args:
+            code: Python (IronPython) code to execute inside Revit.
+            description: Short label for logs/output.
+            instance: Revit version year (e.g. "2024", "2025") to target when
+                multiple Revits are running. If omitted, uses the single active
+                instance, or the newest version if more than one. Call
+                list_revit_instances to see what's available.
         """
         try:
             payload = {"code": code, "description": description}
@@ -47,7 +59,9 @@ def register_code_execution_tools(mcp, revit_get, revit_post, revit_image=None):
             if ctx:
                 await ctx.info("Executing code: {}".format(description))
 
-            response = await revit_post("/execute_code/", payload, ctx, timeout=60.0)
+            response = await revit_post(
+                "/execute_code/", payload, ctx, instance=instance, timeout=60.0
+            )
             return format_response(response)
 
         except (ConnectionError, ValueError, RuntimeError) as e:
