@@ -26,4 +26,4 @@ def register_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func
     )
     register_launch_tools(mcp_server, revit_get_func)
     register_document_tools(mcp_server, revit_get_func, revit_post_func)
-    register_instance_tools(mcp_server)
+    register_instance_tools(mcp_server, revit_get_func, revit_post_func)

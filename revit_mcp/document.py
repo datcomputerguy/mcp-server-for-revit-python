@@ -16,6 +16,91 @@ logger = logging.getLogger(__name__)
 def register_document_routes(api):
     """Register all document management routes with the API."""
 
+    @api.route("/list_documents/", methods=["GET"])
+    def list_documents(uidoc, request):
+        """
+        List all open Revit documents with save/sync state.
+
+        Returns metadata for every Document currently open in the
+        Application, so callers can decide what to Save, Sync, or
+        discard before closing Revit. The active document is flagged
+        with is_active=True.
+
+        Returned fields per document:
+            title          - Document.Title
+            path           - Document.PathName (empty for unsaved/new)
+            is_active      - True if this is the currently-active doc
+            is_modified    - True if there are unsaved local changes
+            is_workshared  - True if the doc is a workshared central/local
+            is_detached    - True if opened detached from central
+            is_family      - True if this is a .rfa family document
+            is_linked      - True if opened as a Revit link (not primary)
+        """
+        try:
+            uiapp = revit.HOST_APP.uiapp
+            app = uiapp.Application
+
+            active_doc = uidoc.Document if uidoc else None
+            active_title = (
+                active_doc.Title if active_doc else None
+            )
+
+            docs = []
+            for d in app.Documents:
+                if d is None:
+                    continue
+                try:
+                    is_workshared = bool(d.IsWorkshared)
+                except Exception:
+                    is_workshared = False
+
+                is_detached = False
+                if is_workshared:
+                    try:
+                        # A detached workshared doc has no central model path
+                        central_path = d.GetWorksharingCentralModelPath()
+                        is_detached = central_path is None
+                    except Exception:
+                        is_detached = False
+
+                docs.append({
+                    "title": d.Title if d.Title else "Untitled",
+                    "path": d.PathName or "",
+                    "is_active": (d.Title == active_title)
+                    if active_title else False,
+                    "is_modified": bool(d.IsModified),
+                    "is_workshared": is_workshared,
+                    "is_detached": is_detached,
+                    "is_family": bool(d.IsFamilyDocument),
+                    "is_linked": bool(d.IsLinked),
+                })
+
+            modified_count = sum(1 for x in docs if x["is_modified"])
+            workshared_modified = sum(
+                1 for x in docs
+                if x["is_modified"] and x["is_workshared"]
+            )
+
+            return routes.make_response(
+                data={
+                    "status": "success",
+                    "count": len(docs),
+                    "modified_count": modified_count,
+                    "workshared_modified_count": workshared_modified,
+                    "documents": docs,
+                }
+            )
+
+        except Exception as e:
+            logger.error("Failed to list documents: {}".format(str(e)))
+            return routes.make_response(
+                data={
+                    "error": "Failed to list documents: {}".format(str(e)),
+                    "traceback": traceback.format_exc(),
+                },
+                status=500,
+            )
+
     @api.route("/open_document/", methods=["POST"])
     def open_document(uidoc, request):
         """

@@ -10,6 +10,29 @@ def register_document_tools(mcp, revit_get, revit_post):
     """Register document management tools with the MCP server."""
 
     @mcp.tool()
+    async def list_open_documents(
+        ctx: Context,
+        instance: Optional[str] = None,
+    ) -> str:
+        """List all open Revit documents with save/sync state.
+
+        Returns every Document currently open in the target Revit,
+        with flags for is_active, is_modified, is_workshared,
+        is_detached, is_family, and is_linked. Call this before
+        close_revit_instance so you can decide what to Save, Sync,
+        or discard. Save and Sync are DIFFERENT operations on a
+        workshared doc — Save writes only the local copy, Sync
+        pushes changes to central.
+
+        Args:
+            instance: Revit version year to target. See list_revit_instances.
+        """
+        response = await revit_get(
+            "/list_documents/", ctx, instance=instance
+        )
+        return format_response(response)
+
+    @mcp.tool()
     async def open_document(
         ctx: Context,
         file_path: str,
