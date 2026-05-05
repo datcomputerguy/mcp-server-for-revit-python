@@ -8,10 +8,21 @@ each by Revit version year, and caches the result so every subsequent
 tool call can target a specific instance.
 
 Public API:
-    await discover_instances(force=False) -> Dict[version_year, InstanceInfo]
+    await discover_instances(force=False) -> Dict[port_str, InstanceInfo]
     await resolve_port(instance: str | None) -> int
     await invalidate()
     REVIT_HOST, REVIT_PORT_RANGE, PYREVIT_API_ROOT  (module constants)
+
+The registry is keyed by pyRevit Routes port (as a string like "48884"), NOT
+by Revit version year. This allows multiple Revits of the same version year
+to coexist — e.g. three Revit 2024 instances on ports 48884/48885/48886.
+
+Callers of resolve_port(instance) may pass:
+    - a bare port number like "48885"  (direct targeting, always unambiguous)
+    - a Revit version year like "2024" (picks the lowest-port instance of
+      that year; back-compat for the single-instance-per-year case)
+    - None                             (auto-selects: latest version year,
+                                        lowest port of that year)
 """
 
 import anyio
@@ -150,12 +161,9 @@ async def discover_instances(force: bool = False) -> Dict[str, InstanceInfo]:
             async def _one(p: int):
                 info = await _probe_one(client, p)
                 if info:
-                    # Duplicate version keys (unlikely but possible if two
-                    # Revits report the same VersionNumber somehow) —
-                    # keep the lower-numbered port.
-                    v = info["version"]
-                    if v not in discovered or info["port"] < discovered[v]["port"]:
-                        discovered[v] = info
+                    # Keyed by PORT (unique) so that multiple Revits of the
+                    # same version year don't collapse into a single entry.
+                    discovered[str(info["port"])] = info
 
             async with anyio.create_task_group() as tg:
                 for port in REVIT_PORT_RANGE:
@@ -166,17 +174,48 @@ async def discover_instances(force: bool = False) -> Dict[str, InstanceInfo]:
         return dict(_instances)
 
 
+def _looks_like_port(s: str) -> bool:
+    """A caller-supplied instance string is a port if it's a pure integer
+    that falls inside the scan range. Revit version years (2024/2025) are
+    4-digit ints too, so we also check the range explicitly."""
+    try:
+        n = int(s)
+    except (TypeError, ValueError):
+        return False
+    return REVIT_PORT_RANGE.start <= n < REVIT_PORT_RANGE.stop
+
+
+def _describe_available(registry: Dict[str, InstanceInfo]) -> str:
+    """Human-readable summary for error messages: version @ port pairs."""
+    if not registry:
+        return "(none)"
+    entries = []
+    for info in sorted(registry.values(), key=lambda i: int(i.get("port", 0))):
+        entries.append(
+            "{}@{}".format(info.get("version", "?"), info.get("port", "?"))
+        )
+    return ", ".join(entries)
+
+
 async def resolve_port(instance: Optional[str] = None) -> int:
     """Return the pyRevit Routes port for the target Revit instance.
 
     If instance is None:
       - Exactly one Revit running: use it.
-      - Multiple Revits running: use the latest version year (e.g. 2025 > 2024).
+      - Multiple Revits running: use the latest version year (e.g. 2025 > 2024);
+        if the latest year has multiple instances, pick the lowest port.
       - Zero Revits: RuntimeError.
 
-    If instance is a version year string like "2024":
-      - Rescan if unknown to pick up newly-launched Revits.
-      - Raise RuntimeError with available versions if still not found.
+    If instance is a PORT NUMBER string like "48885":
+      - Look it up directly in the port-keyed registry.
+      - Rescan if unknown; raise RuntimeError if still not found.
+
+    If instance is a VERSION YEAR string like "2024":
+      - Find all instances matching that version; pick the lowest port.
+        (For back-compat with the single-instance-per-year case.)
+      - When multiple same-year instances exist, callers that need to
+        target a specific one must pass a port number instead.
+      - Rescan if unknown; raise RuntimeError if still not found.
     """
     registry = await discover_instances()
     if not registry:
@@ -188,27 +227,55 @@ async def resolve_port(instance: Optional[str] = None) -> int:
 
     if instance:
         key = str(instance)
-        if key not in registry:
-            registry = await discover_instances(force=True)
-        if key not in registry:
-            available = ", ".join(sorted(registry.keys())) or "(none)"
-            raise RuntimeError(
-                f"Revit {key} is not running. Available: {available}"
-            )
-        return int(registry[key]["port"])
 
+        # Path 1: direct port targeting
+        if _looks_like_port(key):
+            if key not in registry:
+                registry = await discover_instances(force=True)
+            if key not in registry:
+                raise RuntimeError(
+                    "No Revit instance listening on port {}. Available: {}".format(
+                        key, _describe_available(registry)
+                    )
+                )
+            return int(registry[key]["port"])
+
+        # Path 2: version year — find all matching, pick lowest port.
+        matches = [
+            info for info in registry.values()
+            if str(info.get("version")) == key
+        ]
+        if not matches:
+            registry = await discover_instances(force=True)
+            matches = [
+                info for info in registry.values()
+                if str(info.get("version")) == key
+            ]
+        if not matches:
+            raise RuntimeError(
+                "Revit {} is not running. Available: {}".format(
+                    key, _describe_available(registry)
+                )
+            )
+        matches.sort(key=lambda i: int(i.get("port", 0)))
+        return int(matches[0]["port"])
+
+    # No instance specified.
     if len(registry) == 1:
         return int(next(iter(registry.values()))["port"])
 
-    # Multiple instances — prefer the latest numeric version.
-    def _sort_key(v: str):
+    # Multiple instances — prefer the latest numeric version, then lowest port.
+    def _sort_key(info: InstanceInfo):
+        v = str(info.get("version", ""))
         try:
-            return (0, int(v))
+            vnum = int(v)
         except ValueError:
-            return (1, v)
+            vnum = -1
+        # Negate vnum so max() picks the highest; port ascending for tiebreak.
+        return (-vnum, int(info.get("port", 999999)))
 
-    latest = max(registry.keys(), key=_sort_key)
-    return int(registry[latest]["port"])
+    chosen = min(registry.values(), key=_sort_key)
+    return int(chosen["port"])
 
 
 async def invalidate() -> None:
@@ -222,10 +289,10 @@ async def register_instance(version: str, port: int, document_title: Optional[st
     """Manually insert a newly-launched instance into the registry.
 
     Useful right after launch_revit so subsequent calls don't pay the
-    rediscovery cost.
+    rediscovery cost. Keyed by port so multiple same-year instances coexist.
     """
     async with _lock:
-        _instances[str(version)] = {
+        _instances[str(int(port))] = {
             "version": str(version),
             "port": int(port),
             "document_title": document_title,
@@ -233,7 +300,23 @@ async def register_instance(version: str, port: int, document_title: Optional[st
         }
 
 
-async def unregister_instance(version: str) -> None:
-    """Remove an instance (e.g. after closing that Revit)."""
+async def unregister_instance(version_or_port: str) -> None:
+    """Remove an instance from the registry.
+
+    Accepts either a port string (preferred, unambiguous) or a version year.
+    When multiple instances share a version year, only the lowest-port one
+    is removed — callers that need precision should pass a port.
+    """
     async with _lock:
-        _instances.pop(str(version), None)
+        key = str(version_or_port)
+        # Direct port hit first
+        if key in _instances:
+            _instances.pop(key, None)
+            return
+        # Fall back to version-year lookup (lowest port wins)
+        matches = sorted(
+            (p for p, info in _instances.items() if str(info.get("version")) == key),
+            key=lambda p: int(p),
+        )
+        if matches:
+            _instances.pop(matches[0], None)

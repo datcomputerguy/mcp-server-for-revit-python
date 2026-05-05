@@ -329,14 +329,23 @@ def register_instance_tools(mcp, revit_get, revit_post):
             )
 
         if not instance and save_mode != "force" and len(registry) > 1:
+            # Summarise as version@port pairs so the caller can disambiguate.
+            available = sorted(
+                (
+                    "{}@{}".format(info.get("version", "?"), info.get("port", "?"))
+                    for info in registry.values()
+                ),
+                key=lambda s: s,
+            )
             return json.dumps(
                 {
                     "status": "error",
                     "error": (
                         "Multiple Revit instances running; refusing to auto-"
-                        "select for a close operation. Pass instance=\"YEAR\"."
+                        "select for a close operation. Pass instance=\"YEAR\" "
+                        "or instance=\"PORT\" (e.g. \"48885\") to target one."
                     ),
-                    "available": sorted(registry.keys()),
+                    "available": available,
                 },
                 indent=2,
             )
@@ -347,17 +356,17 @@ def register_instance_tools(mcp, revit_get, revit_post):
             return json.dumps({"status": "error", "error": str(e)}, indent=2)
 
         # Resolve the version we're targeting for logging/response.
+        # Registry is keyed by port; look up directly.
         target_version = None
-        for v, info in registry.items():
-            if int(info.get("port", -1)) == port:
-                target_version = v
-                break
+        info = registry.get(str(port))
+        if info:
+            target_version = str(info.get("version"))
 
         # ---- force: straight to hard kill ----------------------------------
         if save_mode == "force":
             result = await _hard_terminate_by_port(port, ctx=ctx)
             if result.get("status") == "success" and target_version:
-                await unregister_instance(target_version)
+                await unregister_instance(str(port))
             return json.dumps(
                 {
                     "status": result.get("status"),
@@ -526,7 +535,7 @@ def register_instance_tools(mcp, revit_get, revit_post):
             )
             if graceful.get("status") == "success":
                 if target_version:
-                    await unregister_instance(target_version)
+                    await unregister_instance(str(port))
                 return json.dumps(
                     {
                         "status": "success",
@@ -548,7 +557,7 @@ def register_instance_tools(mcp, revit_get, revit_post):
                 )
             hard = await _hard_terminate_by_port(port, ctx=ctx)
             if hard.get("status") == "success" and target_version:
-                await unregister_instance(target_version)
+                await unregister_instance(str(port))
             return json.dumps(
                 {
                     "status": hard.get("status"),
@@ -600,7 +609,7 @@ async def _close_clean_and_terminate(
     )
     if graceful.get("status") == "success":
         if target_version:
-            await unregister_instance(target_version)
+            await unregister_instance(str(port))
         return json.dumps(
             {
                 "status": "success",

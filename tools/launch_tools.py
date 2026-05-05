@@ -144,8 +144,18 @@ async def _wait_for_instance_ready(
             )
         try:
             registry = await discover_instances(force=True)
-            info = registry.get(str(target_version))
-            if info:
+            # Registry is keyed by port; find the lowest-port entry matching
+            # our target version. When launching a second same-year instance
+            # we may briefly see the older one first — the fresh instance
+            # shows up on a higher port a moment later.
+            matches = sorted(
+                (
+                    info for info in registry.values()
+                    if str(info.get("version")) == str(target_version)
+                ),
+                key=lambda i: int(i.get("port", 0)),
+            )
+            for info in matches:
                 if not require_document:
                     return True, info
                 if info.get("document_title"):
