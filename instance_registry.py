@@ -32,7 +32,9 @@ from typing import Dict, Optional
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-REVIT_HOST = "localhost"
+# 127.0.0.1, not "localhost": on systems where localhost resolves to ::1
+# (IPv6) first, the connection to pyRevit Routes goes to the wrong address.
+REVIT_HOST = "127.0.0.1"
 # pyRevit Routes binds to 48884; a second Revit auto-increments to 48885,
 # a third to 48886, and so on. We probe a short range to find them all.
 REVIT_PORT_RANGE = range(48884, 48895)
